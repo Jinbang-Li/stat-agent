@@ -1,0 +1,12 @@
+# 统一换行：仓库里存 LF，检出时按平台转换
+* text=auto eol=lf
+
+*.py   text diff=python
+*.md   text
+*.json text
+*.svg  text
+*.txt  text
+
+# 数据文件不做 diff
+*.csv  text -diff
+*.db   binary

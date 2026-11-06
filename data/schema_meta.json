@@ -1,0 +1,65 @@
+{
+  "version": "1.0",
+  "dataset": "县域经济面板数据（合成样本，用于演示与回归测试）",
+  "notes": [
+    "scope 决定哪些表、哪些列对外可见；不在 scope 里的表，SQL 连读都读不到。",
+    "columns 里的 name/unit/aliases 是给模型看的中文口径，schema 自动发现负责补上真实类型。",
+    "改这份文件必须重启服务，启动时会做一次一致性校验（库里有的、字典里没写的会告警）。"
+  ],
+  "scope": {
+    "county_economy": [
+      "county_id", "county_name", "province", "city", "year", "gdp", "income",
+      "agri_output", "finance_exp", "population", "secondary_ratio"
+    ],
+    "county_info": [
+      "county_id", "county_name", "province", "city", "terrain",
+      "is_poverty_county", "area_km2"
+    ]
+  },
+  "tables": {
+    "county_economy": {
+      "comment": "县级经济面板数据，每县每年一行",
+      "grain": "county_id × year",
+      "columns": {
+        "county_id": {"name": "县编号", "unit": "", "aliases": ["编号"], "note": "主键之一"},
+        "county_name": {"name": "县（市）名称", "unit": "", "aliases": ["县名", "地区"], "note": ""},
+        "province": {"name": "所属省份", "unit": "", "aliases": ["省"], "note": ""},
+        "city": {"name": "所属地级市", "unit": "", "aliases": ["地级市", "地市"], "note": "与 county_info.city 一致"},
+        "year": {"name": "年份", "unit": "年", "aliases": ["年度"], "note": "2015-2023"},
+        "gdp": {"name": "地区生产总值", "unit": "万元", "aliases": ["GDP", "生产总值", "经济总量", "经济体量"], "note": "当年价"},
+        "income": {"name": "居民人均可支配收入", "unit": "元", "aliases": ["收入", "可支配收入", "居民收入", "人均收入"], "note": "人均口径"},
+        "agri_output": {"name": "农业总产值", "unit": "万元", "aliases": ["农林牧渔业总产值", "农产值", "农业", "第一产业产值"], "note": "当年价"},
+        "finance_exp": {"name": "一般公共预算支出", "unit": "万元", "aliases": ["财政支出", "预算支出", "财政"], "note": ""},
+        "population": {"name": "常住人口", "unit": "万人", "aliases": ["人口", "常住人口"], "note": ""},
+        "secondary_ratio": {"name": "第二产业增加值占 GDP 比重", "unit": "%", "aliases": ["第二产业占比", "工业化率", "产业占比"], "note": "0-100"}
+      }
+    },
+    "county_info": {
+      "comment": "县级维度信息，每县一行",
+      "grain": "county_id",
+      "columns": {
+        "county_id": {"name": "县编号", "unit": "", "aliases": ["编号"], "note": "主键"},
+        "county_name": {"name": "县（市）名称", "unit": "", "aliases": ["县名"], "note": ""},
+        "province": {"name": "所属省份", "unit": "", "aliases": ["省"], "note": ""},
+        "city": {"name": "所属地级市", "unit": "", "aliases": ["地级市", "市"], "note": ""},
+        "terrain": {"name": "地形类型", "unit": "", "aliases": ["地形"], "note": "平原 / 丘陵 / 山地"},
+        "is_poverty_county": {"name": "是否原国家级贫困县", "unit": "", "aliases": ["贫困县"], "note": "1=是，0=否"},
+        "area_km2": {"name": "行政区域面积", "unit": "平方公里", "aliases": ["面积"], "note": ""}
+      }
+    }
+  },
+  "derived": {
+    "gdp_per_capita": {
+      "name": "人均 GDP",
+      "formula": "gdp / population",
+      "unit": "元/人",
+      "note": "gdp 单位万元、population 单位万人，相除即得元/人，不要再乘 10000"
+    },
+    "agri_share": {
+      "name": "农业总产值占 GDP 比重",
+      "formula": "agri_output / gdp * 100",
+      "unit": "%",
+      "note": "两者同为万元口径，可直接相除"
+    }
+  }
+}
