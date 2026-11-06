@@ -30,7 +30,7 @@ from core.logging_setup import setup_logging              # noqa: E402
 
 def _banner(info):
     print("")
-    print("  县域经济统计分析 Agent")
+    print("  经济数据分析 Agent")
     print("  数据源 : %s" % info.get("datasource"))
     print("  数据表 : %s" % "、".join(info.get("tables") or []))
     print("  模型   : %s" % info.get("llm"))
@@ -267,7 +267,7 @@ def cmd_repl(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="县域经济统计分析 Agent（NL2SQL + 自动统计建模）")
+        description="经济数据分析 Agent（NL2SQL + 自动统计建模）")
     sub = parser.add_subparsers(dest="cmd")
 
     p = sub.add_parser("ask", help="单次问答")

@@ -43,7 +43,7 @@ def _rerun():
         st.experimental_rerun()
 
 # ----------------------------------------------------------------- 页面设置
-st.set_page_config(page_title="经济统计分析助手", page_icon="📊", layout="wide")
+st.set_page_config(page_title="经济数据分析 Agent", page_icon="📊", layout="wide")
 
 EXAMPLES = [
     ("描述统计", "2023年各县农村居民收入的分布情况"),
@@ -130,8 +130,8 @@ st.sidebar.caption(
 
 # ----------------------------------------------------------------- 主区
 st.markdown(
-    '<div class="sa-hero"><h1>经济统计分析助手</h1>'
-    '<div class="sa-sub">用自然语言提问，系统负责取数、选统计方法、做检验、出图、写报告。</div></div>',
+    '<div class="sa-hero"><h1>经济数据分析 Agent</h1>'
+    '<div class="sa-sub">用自然语言提问或直接上传 Excel，系统负责取数、选统计方法、做检验、出图、写报告。</div></div>',
     unsafe_allow_html=True,
 )
 
