@@ -248,10 +248,17 @@ def _run_group(df, plan, an):
                        % "、".join("%s %s（n=%d）" % (g["name"], _f(g["mean"]), g["n"])
                                   for g in res["groups"]))
     if res.get("effect_size") is not None:
+        eff = res["effect_size"] or 0.0
+        # Kruskal-Wallis 的 epsilon² 在 H < 自由度时会算出负数。
+        # 负的"解释比例"没有意义，按 0 报，并把原始值写在括号里——
+        # 既不让读者看到 -3.1% 这种吓人的数，也不偷偷把计算值抹掉。
+        shown = max(0.0, eff)
+        note = res["effect_note"]
+        if eff < 0:
+            note += "（原始值 %.3f，按定义下限取 0）" % eff
         an.findings.append("效应量 %s=%s，属%s水平，即分组大约解释了 %.1f%% 的变异；"
                            "p 值只说「差异不太可能是巧合」，效应量才说明差异有多大。"
-                           % (res["effect_name"], _f(res["effect_size"], 3),
-                              res["effect_note"], max(0.0, (res["effect_size"] or 0)) * 100))
+                           % (res["effect_name"], _f(shown, 3), note, shown * 100))
     if res.get("posthoc"):
         sig = [x for x in res["posthoc"] if (x.get("p_bonferroni") or 1) < config.ALPHA]
         if sig:

@@ -12,13 +12,14 @@
 用户问过什么、系统为什么没答上来。
 """
 
+import os
 import re
 import time
 
 import pandas as pd
 
 from . import analysis as analysis_mod
-from . import audit, config, schema as schema_mod
+from . import audit, config, history, schema as schema_mod
 from .charts import render as render_svg
 from .data_loader import cleaning_notes, detect_structure, profile, to_frame
 from .intent import classify
@@ -32,6 +33,10 @@ from .stats_router import route
 log = get_logger("pipeline")
 
 _SCHEMA_CACHE = {}
+
+# Excel 通道没收到问题时用的默认分析目标。写在这里而不是散在调用处，
+# 是为了让报告标题、历史记录、审计三处说的都是同一句话。
+DEFAULT_FRAME_QUESTION = "看看这组数据的分布和基本统计特征"
 
 
 class Result(object):
@@ -57,6 +62,7 @@ class Result(object):
         self.degraded = []
         self.error = ""
         self.tokens = {}
+        self.data_source = "sql"
         self.ts = time.strftime("%Y-%m-%d %H:%M:%S")
 
     @property
@@ -75,6 +81,7 @@ class Result(object):
             "charts": self.charts, "timings": self.timings,
             "degraded": self.degraded, "error": self.error,
             "tokens": self.tokens, "ok": self.ok,
+            "data_source": self.data_source,
         }
         if include_rows:
             d["rows"] = self.rows[:200]
@@ -143,7 +150,7 @@ def answer(question, session_id="local", actor="local", llm=None, source=None,
                   "label": "未执行", "steps": [], "warnings": [], "notes": []}
         r.timings["total_ms"] = int((time.time() - started) * 1000)
         if persist:
-            _write_audit(r)
+            _persist(r)
         log_event(log, "question_blocked", reason=gate["degraded"])
         return r
 
@@ -159,10 +166,84 @@ def answer(question, session_id="local", actor="local", llm=None, source=None,
         r.tokens = dict(getattr(llm, "total_usage", {}) or {})
 
     if persist:
-        _write_audit(r)
+        _persist(r)
     log_event(log, "question_done", ms=r.timings.get("total_ms"), ok=r.ok,
               n_rows=r.n_rows, degraded=",".join(r.degraded) or None)
     return r
+
+
+def answer_frame(df, question="", session_id="local", actor="local", llm=None,
+                 persist=True, source_label=""):
+    """对一张已经在内存里的表做分析（Excel 上传通道）。
+
+    与 `answer()` 的区别只有一处：**跳过了意图无关的 SQL 环节**——没有 NL2SQL、
+    没有四层 SQL 校验、没有 audit 里的 sql 字段。统计路由、计算、图表、报告
+    完全复用，所以两条通道给出的方法选择与措辞标准是一致的。
+
+    这里也刻意不做 `_precheck`：那道闸门拦的是"想改库"和"字段不在白名单"，
+    而 Excel 的字段是用户自己带来的，字段名天然不在库的字典里。
+    """
+    started = time.time()
+    r = Result()
+    r.question = (question or "").strip()
+    # 用户没写问题时补一句默认的，而不是留空：
+    # 报告标题、历史记录、审计都要能说清"这次到底分析的是什么"。
+    if not r.question:
+        r.question = DEFAULT_FRAME_QUESTION
+    r.session_id = session_id or "local"
+    r.actor = actor or "local"
+    r.trace_id = new_trace_id()
+    r.data_source = source_label or "excel"
+    log_event(log, "frame_received", question=r.question, rows=len(df),
+              source=r.data_source)
+
+    r.profile = profile(df)
+    if len(df) == 0:
+        r.error = "文件里没有可用数据行"
+        r.report = {"markdown": _empty_frame_report(), "source": "guard",
+                    "flags": ["data:empty"]}
+        r.timings["total_ms"] = int((time.time() - started) * 1000)
+        if persist:
+            _persist(r)
+        return r
+
+    llm = llm or LLMClient(quiet=True)
+
+    try:
+        set_stage("intent")
+        with Timer() as t:
+            intent = classify(r.question, llm if llm.online else None)
+        r.timings["intent_ms"] = t.ms
+        r.intent = intent.to_dict()
+        if intent.causal_request:
+            r.degraded.append("intent:causal_requested")
+
+        r.timings["sql_ms"] = 0
+        r.timings["load_ms"] = 0
+        _analyze(r, df, intent, llm, {"sql": "", "sql_source": "excel",
+                                      "data_source": r.data_source})
+    except Exception as exc:                              # noqa: BLE001
+        r.error = "%s: %s" % (type(exc).__name__, exc)
+        r.report = {"markdown": _crash_report(r), "source": "guard",
+                    "flags": ["pipeline:error"]}
+        log_event(log, "frame_error", level="error", error=r.error)
+
+    r.timings["total_ms"] = int((time.time() - started) * 1000)
+    if llm is not None:
+        r.tokens = dict(getattr(llm, "total_usage", {}) or {})
+    if persist:
+        _persist(r)
+    log_event(log, "frame_done", ms=r.timings.get("total_ms"), ok=r.ok,
+              method=(r.plan or {}).get("method"))
+    return r
+
+
+def answer_excel(path, question="", sheet=None, **kwargs):
+    """从 .xlsx/.xls 文件读表并分析。"""
+    from .excel_io import read_frame
+    df = read_frame(path, sheet=sheet)
+    label = "excel:%s" % os.path.basename(str(path))
+    return answer_frame(df, question=question, source_label=label, **kwargs)
 
 
 def _run(r, llm, source):
@@ -216,11 +297,37 @@ def _run(r, llm, source):
                     "flags": ["data:empty"]}
         return
 
+    # ---- 4~7 统计路由 → 计算 → 图表 → 报告（与 Excel 通道共用）
+    _analyze(r, df, intent, llm, {"sql": r.sql, "sql_source": sq.source,
+                                  "data_source": "sql"})
+
+
+def _relabel_steps(plan, data_source):
+    """Excel 通道里没有 SQL，"读取结果集"这种措辞会让用户以为查了库。"""
+    if data_source == "sql":
+        return plan
+    for st in plan.steps:
+        if st.get("step") == "读取结果集":
+            st["step"] = "读取数据表"
+    return plan
+
+
+def _analyze(r, df, intent, llm, ctx):
+    """路线固定，数据来源可变：SQL 查询结果与上传的 Excel 走同一段分析逻辑。
+
+    这一层刻意不关心 df 从哪来——只要它是 DataFrame，路由、计算、绘图、报告
+    的规则就该完全一致。`ctx` 里的 `data_source` 只影响报告里的一句来源说明。
+    """
     # ---- 4 统计路由（这里可能"拒绝"，拒绝不是错误）
     set_stage("route")
+    if not r.columns:
+        r.columns = [str(c) for c in df.columns]
+    if not r.n_rows:
+        r.n_rows = int(len(df))
     with Timer() as t:
         plan = route(df, intent, r.question)
     r.timings["route_ms"] = t.ms
+    plan = _relabel_steps(plan, ctx.get("data_source", "sql"))
     r.plan = plan.to_dict()
 
     used = []
@@ -252,12 +359,26 @@ def _run(r, llm, source):
     # ---- 7 报告
     set_stage("report")
     with Timer() as t:
-        ctx = {"sql": r.sql, "n_rows": len(df), "n_cols": len(df.columns),
-               "sql_source": sq.source, "cleaning_notes": notes}
-        rep = generate_report(r.question, an, plan, llm=llm, context=ctx)
+        c = {"sql": ctx.get("sql", ""), "n_rows": len(df), "n_cols": len(df.columns),
+             "sql_source": ctx.get("sql_source"), "cleaning_notes": notes,
+             "data_source": ctx.get("data_source", "sql")}
+        rep = generate_report(r.question, an, plan, llm=llm, context=c)
     r.timings["report_ms"] = t.ms
     r.report = rep.to_dict()
     r.degraded.extend(rep.flags)
+
+
+def _persist(r):
+    """两套留痕，各司其职：审计（追责，哈希链）与历史（回看，存完整报告）。"""
+    _write_audit(r)
+    _write_history(r)
+
+
+def _write_history(r):
+    try:
+        history.record(r)
+    except Exception as exc:                              # noqa: BLE001
+        log_event(log, "history_failed", level="warning", error=str(exc))
 
 
 def _write_audit(r):
@@ -401,6 +522,15 @@ def _scope_report(r, source=None):
               "",
               "本次没有执行任何 SQL，也没有读取数据。"]
     return "\n".join(lines)
+
+
+def _empty_frame_report():
+    return "\n".join([
+        "# 文件里没有可用数据", "",
+        "读取成功，但清洗后没有剩下任何数据行。", "",
+        "常见原因：表格只有表头、数据在第二个 sheet、或整张表都是空单元格。"
+        "换一个文件，或用 `python main.py excel <文件> --sheet 名称` 指定工作表。",
+    ])
 
 
 def _empty_report(r):

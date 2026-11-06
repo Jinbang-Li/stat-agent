@@ -91,6 +91,33 @@ L4 执行层  强制 LIMIT ≤ 5000 + progress_handler 语句级超时
 
 没有 API Key、接口超时、返回乱码、SQL 跑不通，都会逐级降级并打标记（`llm:offline`、`sql:llm_failed`、`report:offline` …），用户仍然拿到一份可用的报告。离线模式下意图识别和 SQL 生成走内置规则与模板，整条链路照常跑通。
 
+**8. 历史查询记录：能回看，且回看的是"当时那份"**
+
+每次提问都会往 `data/audit.db` 的 `query_history` 表写一条：时间、问题、意图、执行的 SQL、统计方法、一句话结论摘要、返回行数、耗时、是否降级，以及**完整的报告正文与图表**。
+
+界面右上角切到「历史记录」就是最近 20 条，点任意一条回到当时的现场——不是把问题重跑一遍（数据可能已经变了），而是读回存在库里的那份报告。
+
+```bash
+python main.py history                # 最近 20 条
+python main.py history --show 42      # 回看第 42 条，图表同时落盘
+python main.py history --clear        # 清空（可 --keep N 保留最近 N 条）
+```
+
+历史与审计分两张表、各记各的：审计是给合规看的流水（带哈希链，不可改），历史是给人用的书签（可清理）。写历史失败只打一条告警，**不会让一次分析失败**——它是旁路，不是链路的一部分。
+
+**9. Excel 导入：同一套统计链路，换一个数据入口**
+
+上传一张 xlsx（或命令行 `python main.py excel 文件.xlsx`），系统读表、整理列名、识别数值列与分类列，然后**走和数据库查询完全相同的路由与报告逻辑**：同样的方法选择、同样的拒绝规则、同样的图表与"系统生成的统计判定"。
+
+```bash
+python main.py excel data/raw/county_sample.xlsx
+python main.py excel 我的表.xlsx "居民收入和农业总产值有关系吗" --sheet 2023
+```
+
+表格脏是常态，所以读取层做了四件事：列名去空白、空列名补成 `列N`、重名列自动去重、**只在该列 90% 以上是数字、且剩下的都是"缺失/NA/—"这类缺失标记时才转数值**。像"待定"这种认得出的文本，宁可整列保留成分类变量，也不静默变成空值——丢样本比丢精度更糟。
+
+Excel 通道不生成 SQL，报告里会明写「数据来源：用户上传的表格文件（xxx），未经过数据库查询与 SQL 安全校验」，避免有人把上传数据的结论当成库内数据的结论。
+
 ---
 
 ## 三、一次完整的链路
@@ -143,11 +170,13 @@ python main.py                              # 交互式 REPL
 python main.py ask "检验各县居民收入和农业总产值是否存在显著相关关系"
 python main.py serve --port 8010            # 浏览器打开 http://127.0.0.1:8010
 streamlit run app.py                        # Streamlit 界面（需自行 pip install streamlit）
+python main.py excel data/raw/county_sample.xlsx   # 分析一张 Excel
+python main.py history                      # 最近查询记录
 python main.py doctor                       # 体检：数据源、模型、Schema、连通性
 python main.py eval                         # 跑 21 条黄金用例
 ```
 
-三个入口共用同一条 `core/pipeline.answer()`，`app.py` 和 `web/` 里没有业务逻辑。
+三个入口共用同一条 `core/pipeline.answer()`（Excel 通道走 `core/pipeline.answer_frame()`，除了没有 SQL 环节，后面完全一样），`app.py` 和 `web/` 里没有业务逻辑。
 
 ### 4. 接入 DeepSeek（可选）
 
@@ -195,6 +224,7 @@ Web 界面（`python main.py serve`）是零依赖的单页应用，没有 CDN�
 | `ui-ask.png` | 打开 `http://127.0.0.1:8010` | 首屏：状态徽章（数据源 / 模型 / Schema 校验）+ 提问框 + 示例问题 |
 | `ui-report.png` | 提问「贫困县和非贫困县的收入有显著差异吗」 | 结果区：耗时条、图表、"系统生成的统计判定"那一行 |
 | `ui-tabs.png` | 同上，切到「SQL 与校验」标签 | 四层校验逐项 PASS 的明细 |
+| `ui-history.png` | 右上角切到「历史记录」 | 最近 20 条：#id、时间、意图、一句话结论、方法·行数·耗时 |
 
 也支持用 URL 直接出结果，方便录屏和分享：`http://127.0.0.1:8010/?q=贫困县和非贫困县的收入有显著差异吗`
 
@@ -226,6 +256,8 @@ stat_agent/
 │   ├── charts.py            # 手写 SVG 图表
 │   ├── report_gen.py        # 报告生成 + 数字白名单对账
 │   ├── audit.py             # 审计（sha256 哈希链）
+│   ├── history.py           # 历史查询记录（可回看当时那份报告）
+│   ├── excel_io.py          # 读 xlsx / 整理列名 / 数值与分类列识别
 │   ├── llm_client.py        # DeepSeek / Ollama / 离线 三模式客户端
 │   ├── logging_setup.py     # trace_id + 结构化日志
 │   ├── config.py            # 全部阈值与开关
@@ -280,7 +312,9 @@ python main.py eval --quiet    # 只输出结论
 
 每条用例可以断言意图、方法、拒绝码、行数区间、SQL 片段、统计量（带容差）、报告关键词、降级标记。
 
-当前结果：**21 / 21 通过**（含在线真实调用）。另有冒烟 19 项、路由拒绝 9 项、配置与降级 24 项、界面 10 项、图表 7 项。
+当前结果：**21 / 21 通过**（含在线真实调用）。另有冒烟 24 项、路由拒绝 9 项、配置与降级 24 项、界面 10 项、图表 7 项、历史记录 19 项、Excel 通道 25 项。
+
+Excel 那 25 项里有 6 项是真起一个 HTTP 服务、用 multipart 打 `/api/excel` 的：上传、分析、写历史、读历史详情、拒绝非 multipart 请求，一条不落。手写 multipart 比想象中容易错（边界、CRLF、二进制内容），所以这部分不做纯函数测试。
 
 数字都是"对着真实输出"写的断言，不是"跑一遍看看"。改代码后跑一次 `eval`，比肉眼检查可靠。
 

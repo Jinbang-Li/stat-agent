@@ -270,7 +270,7 @@ def _route_group(df, plan, question):
                                 "请指定要比较的指标，例如「居民收入」")
 
     group_col = _pick_group_col(df, cat, question)
-    value_col = num[0]
+    value_col = _pick_value_col(num, question)
 
     counts = df[group_col].value_counts()
     big_enough = counts[counts >= config.MIN_GROUP_SIZE]
@@ -312,6 +312,31 @@ def _pick_group_col(df, cat, question):
     return cat[0]
 
 
+# 问题里点名一个指标时，别用"第一个数值列"顶上。
+# Excel 通道尤其需要这条：表是用户带来的，列顺序没人保证，
+# 问「收入」却算了「GDP」，报告越完整越误导。
+_METRIC_HINTS = ("收入", "生产总值", "产值", "财政", "人口", "第二产业",
+                 "工资", "消费", "投资", "存款", "贷款", "产量", "面积",
+                 "销售额", "利润", "成本", "价格")
+
+
+def _pick_value_col(num, question):
+    """按问题里出现的指标关键词挑数值列；挑不出来才退回第一列。"""
+    q = (question or "").lower()
+    best, best_score = None, 0
+    for c in num:
+        name = str(c)
+        score = 0
+        for w in _METRIC_HINTS:
+            if w in name and w in q:
+                score = max(score, len(w))
+        if "生产总值" in name and "gdp" in q:
+            score = max(score, 4)
+        if score > best_score:
+            best, best_score = c, score
+    return best or num[0]
+
+
 def _route_timeseries(df, plan, question):
     tcol = plan.columns["time"]
     num = [c for c in plan.columns["numeric"] if _missing_ok(df, c)[0]]
@@ -334,7 +359,8 @@ def _route_timeseries(df, plan, question):
 
     plan.method = "timeseries"
     plan.label = "ADF 平稳性检验 + 趋势外推 / ARIMA"
-    plan.params = {"value": num[0], "time": tcol, "periods": periods}
+    plan.params = {"value": _pick_value_col(num, question), "time": tcol,
+                   "periods": periods}
     plan.step("方法选择", "先做 ADF 检验；时间点 <15 用对数线性趋势（参数少、外推可控），"
                           "≥15 才用 ARIMA")
     return plan
@@ -366,7 +392,8 @@ def _route_outlier(df, plan, question):
     num = [c for c in plan.columns["numeric"] if _missing_ok(df, c)[0]]
     if not num:
         return plan.reject_with("no_numeric", "没有可做异常诊断的数值指标")
-    n = int(df[num[0]].notna().sum())
+    value_col = _pick_value_col(num, question)
+    n = int(df[value_col].notna().sum())
     plan.step("样本量检查", "n=%d（异常诊断门槛 8）" % n, ok=n >= 8)
     if n < 8:
         return plan.reject_with("sample_too_small",
@@ -375,7 +402,7 @@ def _route_outlier(df, plan, question):
     plan.method = "outliers"
     plan.label = "双重佐证异常诊断（稳健 z + 同比跳变）"
     use_time = plan.structure["kind"] in ("panel", "timeseries") and plan.columns["time"]
-    plan.params = {"value": num[0],
+    plan.params = {"value": value_col,
                    "unit": plan.columns["unit"],
                    "time": plan.columns["time"] if use_time else None}
     plan.step("方法选择",

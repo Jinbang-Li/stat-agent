@@ -25,8 +25,13 @@
   </div>
 </header>
 
+<nav class="viewtabs" id="viewtabs">
+  <button class="viewtab active" data-view="ask">分析</button>
+  <button class="viewtab" data-view="history">历史记录</button>
+</nav>
+
 <main>
-  <section class="card query">
+  <section class="card query" id="askview">
     <div class="q-head">
       <label for="q">提问</label>
       <span class="q-tip">Ctrl / ⌘ + Enter 提交</span>
@@ -35,11 +40,17 @@
       placeholder="例如：贫困县和非贫困县的居民收入有显著差异吗"></textarea>
     <div class="q-actions">
       <div class="samples" id="samples"></div>
-      <button id="ask" class="primary">分析</button>
+      <div class="q-buttons">
+        <label class="upload" id="uploadlabel" title="支持 .xlsx / .xls，首个工作表">
+          <input type="file" id="file" accept=".xlsx,.xls" hidden>
+          <span id="uploadtext">上传 Excel 分析</span>
+        </label>
+        <button id="ask" class="primary">分析</button>
+      </div>
     </div>
     <p class="q-hint">
       支持：数值查询、描述统计、相关检验、分组比较、时序预测、聚类、异常诊断。
-      样本不足或前提不满足时会拒绝建模并说明原因。
+      样本不足或前提不满足时会拒绝建模并说明原因。上传 Excel 时，表格会走与数据库查询相同的分析链路。
     </p>
   </section>
 
@@ -67,6 +78,17 @@
   </section>
 
   <section class="card hidden" id="errorbox"></section>
+
+  <section class="card hidden" id="historyview">
+    <div class="hist-head">
+      <div>
+        <h2>历史记录</h2>
+        <p class="hist-sub" id="histsub">最近 20 条查询，点开可回看当时的完整报告与图表。</p>
+      </div>
+      <button class="ghost" id="histrefresh">刷新</button>
+    </div>
+    <div id="histlist"></div>
+  </section>
 </main>
 
 <footer class="page-foot">

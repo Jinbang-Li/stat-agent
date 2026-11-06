@@ -11,12 +11,16 @@ FastAPI 依赖链的兼容问题）远大于收益。标准库 ThreadingHTTPServ
     GET  /api/health       启动自检（数据源、Schema、模型模式）
     GET  /api/schema       当前表结构提示词
     GET  /api/traces       最近审计记录
+    GET  /api/history      最近历史查询（列表，不含报告正文）
+    GET  /api/history/<id> 单条历史（含完整报告与 SVG 图表）
     GET  /api/metrics      请求量、失败率、平均耗时、token 用量
     POST /api/ask          {"question": "...", "session_id": "..."}
+    POST /api/excel        multipart/form-data：file=<xlsx>、question=<可选>
 """
 
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -31,8 +35,16 @@ log = get_logger("web")
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 MAX_QUESTION = 500
+MAX_UPLOAD = 20 * 1024 * 1024        # 20 MB，Excel 再大就不该在浏览器里分析了
+MAX_EXCEL_ROWS = 20000
 _rate = {}
 _rate_lock = threading.Lock()
+
+
+def _disposition(headers, key):
+    """从 Content-Disposition 里取 name/filename。不引 email.parser，够用就行。"""
+    m = re.search(r'%s="([^"]*)"' % key, headers or "")
+    return m.group(1) if m else ""
 
 
 def _rate_ok(session_id):
@@ -112,6 +124,25 @@ class Handler(BaseHTTPRequestHandler):
                 rows = audit.recent(limit=limit)
                 ok, bad = audit.verify_chain(limit=limit)
                 return self._json({"items": rows, "chain_ok": ok, "chain_bad": bad})
+            if path == "/api/history":
+                from core import history
+                qs = parse_qs(parsed.query)
+                try:
+                    limit = min(int((qs.get("limit") or ["20"])[0]), 100)
+                except ValueError:
+                    limit = 20
+                return self._json({"items": history.recent(limit=limit),
+                                   "total": history.count()})
+            if path.startswith("/api/history/"):
+                from core import history
+                try:
+                    item_id = int(path.rsplit("/", 1)[-1])
+                except ValueError:
+                    return self._json({"error": "无效的记录 ID"}, 400)
+                item = history.get(item_id)
+                if not item:
+                    return self._json({"error": "记录不存在"}, 404)
+                return self._json(item)
             if path == "/api/metrics":
                 return self._metrics()
             if path == "/favicon.ico":
@@ -123,8 +154,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        if parsed.path != "/api/ask":
-            return self._json({"error": "not found"}, 404)
+        if parsed.path == "/api/ask":
+            return self._ask()
+        if parsed.path == "/api/excel":
+            return self._excel()
+        return self._json({"error": "not found"}, 404)
+
+    def _ask(self):
         body = self._read_json()
         question = (body.get("question") or "").strip()
         session = (body.get("session_id") or "web").strip()[:64]
@@ -147,6 +183,79 @@ class Handler(BaseHTTPRequestHandler):
             log.exception("问答失败: %s", e)
             return self._json({"error": "服务内部错误：%s" % e,
                                "trace_id": new_trace_id()}, 500)
+
+    def _excel(self):
+        """上传 Excel：读成 DataFrame 后走与 SQL 相同的分析链路。"""
+        ctype = self.headers.get("Content-Type") or ""
+        if "multipart/form-data" not in ctype:
+            return self._json({"error": "请用 multipart/form-data 上传文件"}, 400)
+        try:
+            fields = self._read_multipart()
+        except ValueError as e:
+            return self._json({"error": str(e)}, 400)
+
+        fname, data = fields.get("file") or ("", b"")
+        question = (fields.get("question") or ("", b""))[1].decode("utf-8", "replace").strip()
+        session = (fields.get("session_id") or ("", b"web"))[1].decode("utf-8", "replace").strip()
+        session = (session or "web")[:64]
+
+        if not data:
+            return self._json({"error": "没有收到文件（字段名应为 file）"}, 400)
+        if not _rate_ok(session):
+            return self._json({"error": "请求过于频繁，请稍后再试（每分钟最多 %d 次）"
+                                        % config.RATE_LIMIT_PER_MIN}, 429)
+        if len(question) > MAX_QUESTION:
+            return self._json({"error": "问题过长，请控制在 %d 字以内" % MAX_QUESTION}, 400)
+
+        from core.excel_io import ExcelError, read_frame
+        from core.pipeline import answer_frame
+        try:
+            df = read_frame(data, max_rows=MAX_EXCEL_ROWS)
+        except ExcelError as e:
+            return self._json({"error": str(e)}, 400)
+
+        if df is None or not len(df):
+            return self._json({"error": "文件里没有可用的数据行"}, 400)
+
+        try:
+            r = answer_frame(df, question=question, session_id=session, actor="web",
+                             source_label="excel:%s" % (fname or "upload"))
+            return self._json(r.to_dict())
+        except Exception as e:
+            log.exception("Excel 分析失败: %s", e)
+            return self._json({"error": "服务内部错误：%s" % e,
+                               "trace_id": new_trace_id()}, 500)
+
+    def _read_multipart(self, limit=MAX_UPLOAD):
+        ctype = self.headers.get("Content-Type") or ""
+        m = re.search(r'boundary="?([^";]+)"?', ctype)
+        if not m:
+            raise ValueError("请求缺少 multipart boundary")
+        boundary = m.group(1).encode("latin-1")
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        if n <= 0:
+            raise ValueError("请求体为空")
+        if n > limit:
+            raise ValueError("文件过大（上限 %d MB）" % (limit // 1024 // 1024))
+        body = self.rfile.read(n)
+
+        fields = {}
+        for part in body.split(b"--" + boundary):
+            part = part.strip(b"\r\n")
+            if not part or part.startswith(b"--"):
+                continue
+            if b"\r\n\r\n" not in part:
+                continue
+            head, data = part.split(b"\r\n\r\n", 1)
+            headers = head.decode("latin-1", "replace")
+            name = _disposition(headers, "name")
+            if not name:
+                continue
+            fields[name] = (_disposition(headers, "filename") or "", data)
+        return fields
 
     # ---------- 具体实现 ----------
     def _static(self, name, ctype):

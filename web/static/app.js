@@ -107,6 +107,29 @@
     });
   }
 
+  function submitFile(file) {
+    var q = $("q").value.trim();
+    var btn = $("ask"), label = $("uploadtext");
+    btn.disabled = true; label.textContent = "读取中…";
+    hideError();
+    showLoading();
+    var fd = new FormData();
+    fd.append("file", file);
+    fd.append("question", q);
+    fd.append("session_id", sessionId());
+    fetch("/api/excel", { method: "POST", body: fd }).then(function (r) {
+      return r.json().then(function (body) { return { status: r.status, body: body }; });
+    }).then(function (res) {
+      if (res.status !== 200) { showError(res.body && res.body.error, res.body && res.body.trace_id); return; }
+      render(res.body);
+    }).catch(function (e) {
+      showError("上传失败：" + e.message);
+    }).then(function () {
+      btn.disabled = false; label.textContent = "上传 Excel 分析";
+      $("file").value = "";
+    });
+  }
+
   function sessionId() {
     try {
       var k = "stat_agent_sid", v = localStorage.getItem(k);
@@ -133,6 +156,7 @@
   }
 
   function render(r) {
+    hasResult = true;
     renderStages(r);
     renderCharts(r.charts || []);
     $("report").innerHTML = markdown((r.report || {}).markdown || "") +
@@ -174,7 +198,12 @@
     var plan = r.plan || {}, checks = r.sql_checks || [];
 
     /* SQL */
-    var sqlHtml = '<pre class="code">' + esc(r.sql || "（未生成 SQL）") + "</pre>";
+    var isExcel = (r.data_source || "sql").indexOf("excel") === 0;
+    var sqlHtml = r.sql
+      ? '<pre class="code">' + esc(r.sql) + "</pre>"
+      : '<div class="empty">' + (isExcel
+          ? "本次没有生成 SQL：数据来自上传的表格文件，不需要查询数据库。"
+          : "本次没有生成 SQL。") + "</div>";
     sqlHtml += '<div style="margin-top:10px">';
     sqlHtml += '<span class="tag">来源：' + esc(r.sql_source || "-") + "</span>";
     if (r.sql_note) sqlHtml += '<span class="tag">' + esc(r.sql_note) + "</span>";
@@ -259,7 +288,8 @@
       "<dt>会话</dt><dd>" + esc(r.session_id) + "</dd>" +
       "<dt>提问者</dt><dd>" + esc(r.actor) + "</dd>" +
       "<dt>时间</dt><dd>" + esc(r.ts) + "</dd>" +
-      "<dt>SQL 来源</dt><dd>" + esc(r.sql_source) + "</dd>" +
+      "<dt>数据来源</dt><dd>" + esc(r.data_source || "sql") + "</dd>" +
+      "<dt>SQL 来源</dt><dd>" + esc(r.sql_source || "-") + "</dd>" +
       "<dt>返回行数</dt><dd>" + esc(r.n_rows) + "</dd>" +
       "<dt>Token</dt><dd>" + esc((tok.prompt_tokens || 0) + " 输入 / " + (tok.completion_tokens || 0) + " 输出") + "</dd>" +
       "<dt>审计</dt><dd>已写入 data/audit.db（哈希链可校验）</dd>" +
@@ -281,6 +311,99 @@
     if (flags.length) bits.push("标记：" + flags.join("、"));
     bits.push("耗时 " + fmtMs((r.timings || {}).total_ms));
     $("footnote").innerHTML = bits.map(esc).join("　·　");
+  }
+
+  /* ---------------- 历史记录 ---------------- */
+  var hasResult = false;
+
+  function showView(name) {
+    $("askview").classList.toggle("hidden", name !== "ask");
+    $("historyview").classList.toggle("hidden", name !== "history");
+    if (name === "ask") {
+      if (hasResult) $("result").classList.remove("hidden");
+    } else {
+      $("result").classList.add("hidden");
+      $("errorbox").classList.add("hidden");
+    }
+    Array.prototype.forEach.call(document.querySelectorAll(".viewtab"), function (b) {
+      b.classList.toggle("active", b.getAttribute("data-view") === name);
+    });
+    if (name === "history") loadHistory();
+  }
+
+  function loadHistory() {
+    $("histlist").innerHTML = '<div class="empty">加载中…</div>';
+    fetch("/api/history?limit=20").then(function (r) { return r.json(); }).then(function (d) {
+      var items = d.items || [];
+      $("histsub").textContent = d.total
+        ? "共 " + d.total + " 条，显示最近 " + items.length + " 条。点开可回看当时的完整报告与图表。"
+        : "还没有记录。回到「分析」提一个问题，这里就会出现。";
+      renderHistoryList(items);
+    }).catch(function (e) {
+      $("histlist").innerHTML = '<div class="empty">加载失败：' + esc(e.message) + "</div>";
+    });
+  }
+
+  function renderHistoryList(items) {
+    if (!items.length) { $("histlist").innerHTML = '<div class="empty">暂无历史记录。</div>'; return; }
+    $("histlist").innerHTML = items.map(function (it) {
+      var badges = [];
+      if (it.data_source && it.data_source !== "sql") badges.push('<span class="tag">Excel</span>');
+      if (it.degraded) badges.push('<span class="tag warn">降级</span>');
+      if (it.ok === 0) badges.push('<span class="tag bad">未完成</span>');
+      return '<div class="hist-item" data-id="' + it.id + '">' +
+        '<div class="hist-top"><span class="hist-id">#' + it.id + "</span>" +
+        '<span class="hist-time">' + esc(it.ts) + "</span>" +
+        '<span class="hist-intent">' + esc(it.intent_label || it.intent || "-") + "</span>" +
+        badges.join("") + "</div>" +
+        '<div class="hist-q">' + esc(it.question) + "</div>" +
+        '<div class="hist-sum">' + esc(it.summary || "") + "</div>" +
+        '<div class="hist-meta">' + esc(it.method || "未建模") + " · " +
+        esc(it.n_rows) + " 行 · " + fmtMs(it.latency_ms) + "</div>" +
+        "</div>";
+    }).join("");
+  }
+
+  function openHistory(id) {
+    $("histlist").innerHTML = '<div class="empty">加载中…</div>';
+    fetch("/api/history/" + id).then(function (r) { return r.json(); }).then(function (it) {
+      if (it.error) { $("histlist").innerHTML = '<div class="empty">' + esc(it.error) + "</div>"; return; }
+      var charts = (it.charts || []).map(function (c) { return '<div class="chart">' + (c.svg || "") + "</div>"; }).join("");
+      var html = '<button class="ghost" id="histback">← 返回列表</button>';
+      html += '<div class="hist-detail">';
+      html += '<h2>' + esc(it.question || "（无问题）") + "</h2>";
+      html += '<div class="kv">' +
+        "<dt>时间</dt><dd>" + esc(it.ts) + "</dd>" +
+        "<dt>意图</dt><dd>" + esc(it.intent_label || it.intent || "-") + "</dd>" +
+        "<dt>统计方法</dt><dd>" + esc(it.method || "-") + "</dd>" +
+        "<dt>数据来源</dt><dd>" + esc(it.data_source || "sql") + "</dd>" +
+        "<dt>样本 / 耗时</dt><dd>" + esc(it.n_rows) + " 行 · " + fmtMs(it.latency_ms) + "</dd>" +
+        "<dt>trace_id</dt><dd>" + esc(it.trace_id || "-") + "</dd>" +
+        "</div>";
+      if (it.degraded) html += '<div class="check"><span class="tag warn">降级</span><span class="note">' + esc(it.degraded) + "</span></div>";
+      if (charts) html += '<div class="charts">' + charts + "</div>";
+      html += '<div class="report">' + markdown((it.report || {}).markdown || "") + "</div>";
+      if (it.sql) html += "<h3>执行过的 SQL</h3><pre class=\"code\">" + esc(it.sql) + "</pre>";
+      html += "</div>";
+      $("histlist").innerHTML = html;
+      $("histback").addEventListener("click", loadHistory);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }).catch(function (e) {
+      $("histlist").innerHTML = '<div class="empty">加载失败：' + esc(e.message) + "</div>";
+    });
+  }
+
+  function initHistory() {
+    $("histlist").addEventListener("click", function (e) {
+      var t = e.target.closest(".hist-item");
+      if (!t) return;
+      openHistory(t.getAttribute("data-id"));
+    });
+    $("histrefresh").addEventListener("click", loadHistory);
+    $("viewtabs").addEventListener("click", function (e) {
+      var t = e.target.closest(".viewtab");
+      if (t) showView(t.getAttribute("data-view"));
+    });
   }
 
   function showError(msg, traceId) {
@@ -322,8 +445,13 @@
   function init() {
     initSamples();
     initTabs();
+    initHistory();
     loadHealth();
     $("ask").addEventListener("click", submit);
+    $("file").addEventListener("change", function (e) {
+      var f = e.target.files && e.target.files[0];
+      if (f) submitFile(f);
+    });
     $("q").addEventListener("keydown", function (e) {
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); submit(); }
     });

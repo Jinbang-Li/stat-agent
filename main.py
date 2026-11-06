@@ -8,6 +8,8 @@
     python main.py doctor          # 启动自检（数据源、Schema、模型、审计）
     python main.py schema          # 打印当前给模型看的表结构提示词
     python main.py traces          # 查看最近的审计记录
+    python main.py history         # 查看历史查询记录（--show ID 回看完整报告）
+    python main.py excel 文件.xlsx  # 分析上传的 Excel（第二个参数可带问题）
     python main.py eval            # 跑黄金用例集
 
 所有子命令都假设当前目录是项目根目录（或已设置 PYTHONPATH）。
@@ -145,6 +147,85 @@ def cmd_eval(args):
     return run_all(verbose=not args.quiet)
 
 
+def cmd_history(args):
+    from core import history
+    if args.clear:
+        left = history.clear(keep=args.keep)
+        print("已清理历史记录，当前剩余 %d 条。" % left)
+        return 0
+
+    if args.show:
+        item = history.get(args.show)
+        if not item:
+            print("没有 id=%s 的记录。" % args.show)
+            return 1
+        print("")
+        print("#%s  %s  %s" % (item["id"], item["ts"], item.get("data_source") or "sql"))
+        print("问题：%s" % item["question"])
+        if item.get("sql"):
+            print("SQL ：%s" % item["sql"])
+        print("方法：%s   样本：%s 行   耗时：%sms" % (
+            item.get("method") or "-", item.get("n_rows"), item.get("latency_ms")))
+        if item.get("degraded"):
+            print("降级：%s" % item["degraded"])
+        print("")
+        print(item["report"].get("markdown", ""))
+        for i, c in enumerate(item.get("charts") or []):
+            path = os.path.join(config.CHART_DIR, "history_%s_%d.svg" % (item["id"], i))
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(c.get("svg") or "")
+                print("图表：%s" % path)
+            except Exception:                             # noqa: BLE001
+                pass
+        return 0
+
+    rows = history.recent(limit=args.limit)
+    if not rows:
+        print("暂无历史记录。执行一次 `python main.py ask \"问题\"` 就有了。")
+        return 0
+    print("")
+    for r in rows:
+        flag = "  [有降级]" if r.get("degraded") else ""
+        print("#%-3s %s  %s · %s%s" % (
+            r["id"], r["ts"], r.get("intent_label") or r.get("intent") or "-",
+            r.get("method") or "未建模", flag))
+        print("     %s" % (r.get("question") or ""))
+        print("     %s 行 · %sms · %s · %s" % (
+            r.get("n_rows"), int(r.get("latency_ms") or 0),
+            r.get("data_source") or "sql", (r.get("summary") or "")[:60]))
+        print("")
+    print("用 `python main.py history --show <ID>` 回看完整报告。")
+    return 0
+
+
+def cmd_excel(args):
+    from core.pipeline import answer_excel
+    path = args.file
+    if not os.path.isfile(path):
+        print("文件不存在：%s" % path)
+        return 1
+    try:
+        r = answer_excel(path, question=args.question or "", sheet=args.sheet,
+                         session_id=args.session, actor="cli")
+    except Exception as exc:                              # noqa: BLE001
+        print("读取失败：%s" % exc)
+        return 1
+    print("")
+    print(r.report.get("markdown", ""))
+    if r.charts:
+        print("图表（SVG，浏览器打开）：")
+        for p in _save_charts(r):
+            print("  " + p)
+        print("")
+    print("数据来源=%s  样本=%s 行  耗时 %sms  报告来源=%s" % (
+        r.data_source, r.n_rows, r.timings.get("total_ms"),
+        (r.report or {}).get("source")))
+    if r.degraded:
+        print("降级标记：%s" % "、".join(r.degraded))
+    return 0 if r.ok else 1
+
+
 def cmd_repl(args):
     from core.pipeline import answer, warmup
     info = warmup()
@@ -167,6 +248,9 @@ def cmd_repl(args):
             continue
         if q == ":traces":
             cmd_traces(argparse.Namespace(limit=10))
+            continue
+        if q in (":history", ":h"):
+            cmd_history(argparse.Namespace(limit=10, show=None, clear=False, keep=0))
             continue
         r = answer(q, session_id=session, actor="cli")
         print("")
@@ -210,6 +294,20 @@ def main():
     p = sub.add_parser("eval", help="跑黄金用例集")
     p.add_argument("--quiet", action="store_true")
     p.set_defaults(func=cmd_eval)
+
+    p = sub.add_parser("history", help="查看历史查询记录")
+    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--show", type=int, default=None, help="按 ID 回看完整报告")
+    p.add_argument("--clear", action="store_true", help="清空历史")
+    p.add_argument("--keep", type=int, default=0, help="清理时保留最近 N 条")
+    p.set_defaults(func=cmd_history)
+
+    p = sub.add_parser("excel", help="分析上传的 Excel 文件")
+    p.add_argument("file")
+    p.add_argument("question", nargs="?", default="")
+    p.add_argument("--sheet", default=None, help="工作表名（默认第一个）")
+    p.add_argument("--session", default="cli")
+    p.set_defaults(func=cmd_excel)
 
     args = parser.parse_args()
     if not getattr(args, "func", None):

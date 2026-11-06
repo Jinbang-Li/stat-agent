@@ -87,6 +87,7 @@ def build_payload(question, analysis, plan, context=None):
             "missing_notes": plan.notes,
             "cleaning_notes": ctx.get("cleaning_notes") or [],
             "sql_source": ctx.get("sql_source"),
+            "source": ctx.get("data_source", "sql"),
         },
         "plan": {
             "method": plan.label, "reject": plan.reject,
@@ -307,6 +308,10 @@ def _template_report(p):
 
     # 一、数据概览
     lines += ["## 一、数据概览", ""]
+    src = d.get("source") or "sql"
+    if src != "sql":
+        lines.append("- 数据来源：用户上传的表格文件（%s），未经过数据库查询与 SQL 安全校验。"
+                     % str(src).replace("excel:", ""))
     bits = []
     if d.get("n_rows") is not None:
         bits.append("有效样本 %s 条" % d["n_rows"])

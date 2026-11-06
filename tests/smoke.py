@@ -81,6 +81,22 @@ def main():
     check("离线仍能出 SQL", res.ok, res.source)
     check("降级标记为 llm:offline", res.degraded == "llm:offline", res.degraded)
 
+    print("== 7. 历史记录与 Excel 通道 ==")
+    import pandas as pd
+    from core import excel_io, history, pipeline
+    check("历史表可写", isinstance(history.count(), int), history.count())
+    tiny = pd.DataFrame({"县名": ["甲", "乙", "丙", "丁", "戊"],
+                         "收入": [1.0, 2.0, 3.0, 4.0, 5.0],
+                         "产值": [2.0, 4.1, 5.9, 8.2, 9.8]})
+    r = pipeline.answer_frame(tiny, question="收入和产值有关系吗",
+                              llm=LLMClient(provider="offline", quiet=True),
+                              persist=False)
+    check("Excel 通道能出报告", bool((r.report or {}).get("markdown")), r.n_rows)
+    check("Excel 通道不走 SQL", not r.sql, repr(r.sql))
+    check("小样本被拒绝建模", bool((r.plan or {}).get("reject")),
+          (r.plan or {}).get("reject_code"))
+    check("列名整理可用", excel_io.normalize(tiny).shape == tiny.shape)
+
     print("\n结果：%d 通过 / %d 失败" % (len(PASS), len(FAIL)))
     if FAIL:
         print("失败项：", FAIL)
