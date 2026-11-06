@@ -127,7 +127,10 @@ def main():
           (r2.intent or {}).get("detected_by"))
     check("自动选择有理由", bool((r2.intent or {}).get("reason")),
           (r2.intent or {}).get("reason"))
-    check("默认问题可读", "分布" in (r2.question or ""), r2.question)
+    # 没提问时问题会被改写成"与方法一致的大白话"，比如
+    # 「比较不同「地形」的「地区生产总值」差异」——至少要点名一个字段。
+    check("默认问题与方法一致", ("「" in (r2.question or "")) or ("分布" in (r2.question or "")),
+          r2.question)
 
     print("6) 上传接口（真起服务，multipart 打一遍）")
     from web.server import Handler

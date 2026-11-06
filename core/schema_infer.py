@@ -395,6 +395,27 @@ def recommend(df, roles=None, question=""):
     return out
 
 
+def auto_question(rec):
+    """按结构推荐的结果，生成一句"人话版"的默认问题。
+
+    用户没写问题时，报告标题、历史记录都用这句。它必须和实际做的方法一致：
+    明明做了时序，标题却写"分布与基本统计特征"，读的人会以为系统答错了题。
+    """
+    roles = rec.get("roles") or {}
+    metrics = [_short(m) for m in (rec.get("metrics") or [])]
+    group = roles.get("group")
+    intent = rec.get("intent")
+    if intent == "group" and group and metrics:
+        return "比较不同「%s」的「%s」差异" % (_short(group), metrics[0])
+    if intent == "timeseries" and metrics:
+        return "看看「%s」随时间的走势" % metrics[0]
+    if intent == "corr" and len(metrics) >= 2:
+        return "「%s」和「%s」有没有关系" % (metrics[0], metrics[1])
+    if metrics:
+        return "看看「%s」的分布和基本统计特征" % metrics[0]
+    return "看看这组数据的分布和基本统计特征"
+
+
 def pad_time_strings(df, col):
     """把「2023年7月」补成「2023年07月」，让字符串排序和真实时间一致。
 

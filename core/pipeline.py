@@ -222,6 +222,10 @@ def answer_frame(df, question="", session_id="local", actor="local", llm=None,
             rec = schema_infer.recommend(df, None, r.question)
             if auto_intent or rec["intent"] != intent.name:
                 intent = Intent(rec["intent"], "structure", rec["reason"])
+                if auto_intent:
+                    # 没提问时把默认问题改写成与实际方法一致的说法，
+                    # 否则会出现"标题写着看分布、实际做的是时序"。
+                    r.question = schema_infer.auto_question(rec)
         r.timings["intent_ms"] = t.ms
         r.intent = intent.to_dict()
         if intent.causal_request:

@@ -434,12 +434,20 @@ def timeseries(df, value_col, time_col, alpha=0.05):
         work = np.diff(work)
         if HAS_ADF and len(work) >= 8:
             try:
-                p2 = adfuller(work, autolag="AIC")[1]
-                out["adf_after_diff"] = {"p": _r(p2, 6), "stationary": bool(p2 < alpha)}
+                stat2, p2 = adfuller(work, autolag="AIC")[:2]
+                out["adf_after_diff"] = {"statistic": _r(stat2), "p": _r(p2, 6),
+                                         "stationary": bool(p2 < alpha)}
                 if p2 >= alpha:
-                    out["refuse"] = ("一阶差分后仍不平稳（ADF p=%.3f），"
+                    out["refuse"] = ("一阶差分后仍不平稳（ADF 统计量=%s，p=%.3f），"
                                      "不满足 ARIMA 的平稳性前提，拒绝建模。"
-                                     "建议先检查数据口径是否变化，或改用更长的序列。" % p2)
+                                     "建议先检查数据口径是否变化，或改用更长的序列。"
+                                     % (_r(stat2), p2))
+                    # 季度累计值几乎必然带季节性和单位根，一阶差分消不掉。
+                    # 这不是"数据坏了"，而是差分方式不对，得说清楚下一步怎么走。
+                    labels = " ".join(str(x) for x in sub[time_col].values[:12])
+                    if ("季度" in labels) or ("Q" in labels.upper()):
+                        out["refuse"] += ("若这是季度累计值，单季同比（同季比）或季节差分"
+                                          "（d=4）通常比一阶差分更合适。")
                     return out
             except Exception:                              # noqa: BLE001
                 pass
