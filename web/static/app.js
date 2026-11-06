@@ -85,6 +85,7 @@
 
   /* ---------------- 提交 ---------------- */
   function submit() {
+    if (pendingFile) return submitFile(pendingFile);
     var q = $("q").value.trim();
     if (!q) { $("q").focus(); return; }
     var btn = $("ask");
@@ -109,8 +110,8 @@
 
   function submitFile(file) {
     var q = $("q").value.trim();
-    var btn = $("ask"), label = $("uploadtext");
-    btn.disabled = true; label.textContent = "读取中…";
+    var btn = $("ask");
+    btn.disabled = true; btn.textContent = "分析中…";
     hideError();
     showLoading();
     var fd = new FormData();
@@ -121,13 +122,62 @@
       return r.json().then(function (body) { return { status: r.status, body: body }; });
     }).then(function (res) {
       if (res.status !== 200) { showError(res.body && res.body.error, res.body && res.body.trace_id); return; }
+      clearPending();
       render(res.body);
     }).catch(function (e) {
       showError("上传失败：" + e.message);
     }).then(function () {
-      btn.disabled = false; label.textContent = "上传 Excel 分析";
-      $("file").value = "";
+      btn.disabled = false;
+      btn.textContent = pendingFile ? "分析这个文件" : "分析";
     });
+  }
+
+  /* ---------------- 文件选择 / 拖拽 ---------------- */
+  var ACCEPT = [".xlsx", ".xlsm", ".xls", ".csv"];
+  var MAX_BYTES = 20 * 1024 * 1024;
+  var pendingFile = null;
+
+  function extOf(name) {
+    var i = (name || "").lastIndexOf(".");
+    return i < 0 ? "" : name.slice(i).toLowerCase();
+  }
+
+  function fmtSize(n) {
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+    return (n / 1024 / 1024).toFixed(1) + " MB";
+  }
+
+  /* 只登记文件，不立刻上传：先让人看清文件名和大小，再点"分析" */
+  function setPendingFile(f) {
+    if (!f) return false;
+    var ext = extOf(f.name);
+    if (ACCEPT.indexOf(ext) < 0) {
+      showError("不支持 " + (ext || "这种") + " 文件；可用格式：" + ACCEPT.join(" / "));
+      return false;
+    }
+    if (!f.size) { showError("这个文件是空的（0 字节）"); return false; }
+    if (f.size > MAX_BYTES) {
+      showError("文件 " + fmtSize(f.size) + " 超过 20 MB 上限");
+      return false;
+    }
+    pendingFile = f;
+    hideError();
+    $("fcbadge").textContent = ext.replace(".", "").toUpperCase();
+    $("fcname").textContent = f.name;
+    $("fcsize").textContent = fmtSize(f.size);
+    $("filechip").classList.remove("hidden");
+    $("ask").textContent = "分析这个文件";
+    return true;
+  }
+
+  function clearPending() {
+    pendingFile = null;
+    $("filechip").classList.add("hidden");
+    $("fcname").textContent = "";
+    $("fcsize").textContent = "";
+    $("ask").textContent = "分析";
+    $("file").value = "";
   }
 
   function sessionId() {
@@ -442,16 +492,60 @@
     });
   }
 
+  function initUpload() {
+    var dz = $("dropzone"), input = $("file");
+
+    dz.addEventListener("click", function () { input.click(); });
+    dz.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); }
+    });
+
+    input.addEventListener("change", function (e) {
+      var f = e.target.files && e.target.files[0];
+      if (f) setPendingFile(f);
+      e.target.value = "";              // 允许再次选中同一个文件
+    });
+
+    $("fcx").addEventListener("click", function (e) {
+      e.stopPropagation();
+      clearPending();
+    });
+
+    ["dragenter", "dragover"].forEach(function (name) {
+      dz.addEventListener(name, function (e) {
+        e.preventDefault(); e.stopPropagation();
+        dz.classList.add("dragover");
+      });
+    });
+    ["dragleave", "dragend"].forEach(function (name) {
+      dz.addEventListener(name, function (e) {
+        e.preventDefault(); e.stopPropagation();
+        // 在子元素之间移动也会触发 dragleave，用 relatedTarget 判一下免得闪
+        if (name === "dragleave" && e.relatedTarget && dz.contains(e.relatedTarget)) return;
+        dz.classList.remove("dragover");
+      });
+    });
+    dz.addEventListener("drop", function (e) {
+      e.preventDefault(); e.stopPropagation();
+      dz.classList.remove("dragover");
+      var dt = e.dataTransfer;
+      var f = dt && dt.files && dt.files[0];
+      if (f) setPendingFile(f);
+    });
+
+    // 拖到页面其它地方时，别让浏览器直接打开这个文件
+    ["dragover", "drop"].forEach(function (name) {
+      window.addEventListener(name, function (e) { e.preventDefault(); });
+    });
+  }
+
   function init() {
     initSamples();
     initTabs();
     initHistory();
+    initUpload();
     loadHealth();
     $("ask").addEventListener("click", submit);
-    $("file").addEventListener("change", function (e) {
-      var f = e.target.files && e.target.files[0];
-      if (f) submitFile(f);
-    });
     $("q").addEventListener("keydown", function (e) {
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); submit(); }
     });

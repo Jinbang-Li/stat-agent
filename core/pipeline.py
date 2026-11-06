@@ -239,10 +239,11 @@ def answer_frame(df, question="", session_id="local", actor="local", llm=None,
 
 
 def answer_excel(path, question="", sheet=None, **kwargs):
-    """从 .xlsx/.xls 文件读表并分析。"""
+    """从 .xlsx/.xlsm/.xls/.csv 文件读表并分析。"""
     from .excel_io import read_frame
     df = read_frame(path, sheet=sheet)
-    label = "excel:%s" % os.path.basename(str(path))
+    name = os.path.basename(str(path))
+    label = ("csv:%s" if name.lower().endswith(".csv") else "excel:%s") % name
     return answer_frame(df, question=question, source_label=label, **kwargs)
 
 

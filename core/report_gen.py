@@ -311,7 +311,7 @@ def _template_report(p):
     src = d.get("source") or "sql"
     if src != "sql":
         lines.append("- 数据来源：用户上传的表格文件（%s），未经过数据库查询与 SQL 安全校验。"
-                     % str(src).replace("excel:", ""))
+                     % re.sub(r"^(?:excel|csv):", "", str(src)))
     bits = []
     if d.get("n_rows") is not None:
         bits.append("有效样本 %s 条" % d["n_rows"])

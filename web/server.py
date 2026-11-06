@@ -41,8 +41,20 @@ _rate = {}
 _rate_lock = threading.Lock()
 
 
+def _source_label(fname):
+    """给上传的数据源起个能看懂的名字：`excel:` / `csv:` 前缀 + 原文件名。"""
+    name = (fname or "上传文件").strip() or "上传文件"
+    prefix = "csv" if name.lower().endswith(".csv") else "excel"
+    return "%s:%s" % (prefix, name)
+
+
 def _disposition(headers, key):
     """从 Content-Disposition 里取 name/filename。不引 email.parser，够用就行。"""
+    # RFC 5987 的 filename*=UTF-8''%E5%B1%85... 优先（Safari / 某些 curl 版本会这么发）
+    m = re.search(r"%s\*=\s*UTF-8''([^;\r\n]+)" % key, headers or "", re.I)
+    if m:
+        from urllib.parse import unquote
+        return unquote(m.group(1).strip())
     m = re.search(r'%s="([^"]*)"' % key, headers or "")
     return m.group(1) if m else ""
 
@@ -210,7 +222,7 @@ class Handler(BaseHTTPRequestHandler):
         from core.excel_io import ExcelError, read_frame
         from core.pipeline import answer_frame
         try:
-            df = read_frame(data, max_rows=MAX_EXCEL_ROWS)
+            df = read_frame(data, max_rows=MAX_EXCEL_ROWS, filename=fname)
         except ExcelError as e:
             return self._json({"error": str(e)}, 400)
 
@@ -219,7 +231,7 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             r = answer_frame(df, question=question, session_id=session, actor="web",
-                             source_label="excel:%s" % (fname or "upload"))
+                             source_label=_source_label(fname))
             return self._json(r.to_dict())
         except Exception as e:
             log.exception("Excel 分析失败: %s", e)
@@ -250,7 +262,12 @@ class Handler(BaseHTTPRequestHandler):
             if b"\r\n\r\n" not in part:
                 continue
             head, data = part.split(b"\r\n\r\n", 1)
-            headers = head.decode("latin-1", "replace")
+            # 浏览器按 RFC 7578 用 UTF-8 传文件名；latin-1 兜底是因为
+            # 有些老客户端仍按 ISO-8859-1 编码。先按 UTF-8 解，解不开再退回。
+            try:
+                headers = head.decode("utf-8")
+            except UnicodeDecodeError:
+                headers = head.decode("latin-1", "replace")
             name = _disposition(headers, "name")
             if not name:
                 continue

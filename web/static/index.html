@@ -41,13 +41,30 @@
     <div class="q-actions">
       <div class="samples" id="samples"></div>
       <div class="q-buttons">
-        <label class="upload" id="uploadlabel" title="支持 .xlsx / .xls，首个工作表">
-          <input type="file" id="file" accept=".xlsx,.xls" hidden>
-          <span id="uploadtext">上传 Excel 分析</span>
-        </label>
         <button id="ask" class="primary">分析</button>
       </div>
     </div>
+
+    <div class="dropzone" id="dropzone" role="button" tabindex="0"
+         aria-label="拖拽 Excel 文件到这里，或点击选择">
+      <input type="file" id="file" accept=".xlsx,.xlsm,.xls,.csv" hidden>
+      <svg class="dz-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 16V4m0 0L7 9m5-5 5 5" fill="none" stroke="currentColor"
+              stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" fill="none"
+              stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+      <div class="dz-title">拖拽 Excel 文件到这里，或点击选择</div>
+      <div class="dz-sub">支持 .xlsx / .xlsm / .xls / .csv，单个文件不超过 20 MB，默认读第一个工作表</div>
+    </div>
+
+    <div class="filechip hidden" id="filechip">
+      <span class="fc-badge" id="fcbadge">XLSX</span>
+      <span class="fc-name" id="fcname">—</span>
+      <span class="fc-size" id="fcsize">—</span>
+      <button type="button" class="fc-x" id="fcx" aria-label="移除所选文件">×</button>
+    </div>
+
     <p class="q-hint">
       支持：数值查询、描述统计、相关检验、分组比较、时序预测、聚类、异常诊断。
       样本不足或前提不满足时会拒绝建模并说明原因。上传 Excel 时，表格会走与数据库查询相同的分析链路。
