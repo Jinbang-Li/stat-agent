@@ -51,6 +51,9 @@ class Analysis(object):
         self.charts = []
         self.findings = []      # 规则生成的要点，供报告层复述（LLM 不得新增数字）
         self.error = ""
+        # 「拒绝建模」是一种合格结论，不是执行失败：数据不合格就说不合格，
+        # 报告照发，不该在日志/历史里标成错误。
+        self.refused = False
         self.n_used = 0
 
     @property
@@ -62,6 +65,7 @@ class Analysis(object):
             "method": self.method, "stats": self.stats, "tables": self.tables,
             "charts": self.charts, "findings": self.findings,
             "error": self.error, "n_used": self.n_used,
+            "refused": self.refused,
         }
 
 
@@ -297,12 +301,53 @@ def _run_timeseries(df, plan, an):
     res = stats_methods.timeseries(df, p["value"], p["time"])
     an.stats["timeseries"] = res
     an.n_used = res.get("n", 0)
+
+    # 先把历史序列画出来：就算后面拒绝建模，用户也该看到数据长什么样。
+    # 横轴是「2023第2季度」这类文本时改用序号 + 标签，硬转 int 会直接抛错。
+    sub = df[[p["time"], p["value"]]].copy()
+    sub[p["value"]] = pd.to_numeric(sub[p["value"]], errors="coerce")
+    sub = sub.dropna().sort_values(p["time"])
+    numeric_axis = pd.to_numeric(sub[p["time"]], errors="coerce").notnull().all()
+    value_label = _label(p["value"])
+    if numeric_axis:
+        obs = [[int(float(t)), _r(v)] for t, v in zip(sub[p["time"]], sub[p["value"]])]
+        x_labels = None
+    else:
+        obs = [[i, _r(v)] for i, v in enumerate(sub[p["value"]])]
+        x_labels = [str(v) for v in sub[p["time"]]]
+
+    start = len(obs)
+    fc = [[start + i, _r(v)] for i, v in enumerate(res.get("forecast") or [])]
+    if x_labels is not None:
+        x_labels = x_labels + ["预测%d" % (i + 1) for i in range(len(fc))]
+
+    spec = {"id": "ts_line", "type": "line",
+            "title": "%s 的历史走势与预测" % value_label,
+            "series": [{"name": "实际值", "points": obs}],
+            "x_label": str(p["time"])}
+    if fc:
+        spec["series"].append({"name": "预测值", "points": fc, "dashed": True})
+    if x_labels:
+        spec["x_labels"] = x_labels
+    an.charts.append(spec)
+
     if res.get("error"):
         an.error = res["error"]
         return
     if res.get("refuse"):
         an.error = res["refuse"]
+        an.refused = True
         an.findings.append(res["refuse"])
+        # 拒绝建模不等于拒绝回答：把序列本身的样子说清楚，
+        # 否则用户只拿到一句「不做」和一个没有解读的图。
+        vals = pd.to_numeric(sub[p["value"]], errors="coerce").dropna()
+        if len(vals) >= 2:
+            first, last = float(vals.iloc[0]), float(vals.iloc[-1])
+            change = ("%.1f%%" % ((last / first - 1.0) * 100.0)) if first else "—"
+            an.findings.append(
+                "序列概况：%d 期，从 %s 到 %s；均值 %s，最小 %s，最大 %s；首末变化 %s。"
+                % (len(vals), sub[p["time"]].iloc[0], sub[p["time"]].iloc[-1],
+                   _r(vals.mean()), _r(vals.min()), _r(vals.max()), change))
         return
     adf = res.get("adf") or {}
     if adf.get("statistic") is not None:
@@ -310,6 +355,9 @@ def _run_timeseries(df, plan, an):
                            % (_f(adf["statistic"], 3), _f(adf.get("p"), 4),
                               "序列平稳" if adf.get("stationary") else "序列非平稳"))
     model = res.get("model") or {}
+    if model.get("unstable"):
+        an.findings.append("模型系数标准误无法估计（Hessian 求逆失败），"
+                           "该模型只用于外推量级，不用于系数显著性判断。")
     if res.get("growth_rate") is not None:
         an.findings.append("采用%s：年均增速 %s%%，R²=%s。"
                            % (model.get("name", "趋势模型"), _f(res["growth_rate"], 2),
@@ -325,14 +373,6 @@ def _run_timeseries(df, plan, an):
                                       for y, v in zip(res.get("forecast_index") or [], res["forecast"])))
     an.findings.append("外推假设「历史趋势延续」，未纳入政策变化与外部冲击；"
                        "预测区间随时间迅速变宽，只应作为量级参考，不宜作为确定性结论。")
-
-    obs = [[int(t), _r(v)] for t, v in zip(df[p["time"]], pd.to_numeric(df[p["value"]], errors="coerce"))]
-    fc = [[int(t), _r(v)] for t, v in zip(res.get("forecast_index") or [], res.get("forecast") or [])]
-    an.charts.append({"id": "ts_line", "type": "line",
-                      "title": "%s 的历史走势与预测" % _label(p["value"]),
-                      "series": [{"name": "实际值", "points": obs},
-                                 {"name": "预测值", "points": fc, "dashed": True}],
-                      "x_label": p["time"]})
 
 
 def _run_cluster(df, plan, an):

@@ -101,6 +101,7 @@ def build_payload(question, analysis, plan, context=None):
         "tables": analysis.tables,
         "charts": [{"title": c.get("title")} for c in analysis.charts],
         "error": analysis.error,
+        "refused": bool(getattr(analysis, "refused", False)),
     }
 
 
@@ -453,8 +454,14 @@ def _limits_section(p, rejected):
         lines.append("- 面板数据的混合相关 p 值未采用（忽略个体自相关会低估标准误），"
                      "仅组内相关用于解读变化关系。")
     for w in (pl.get("warnings") or []):
-        lines.append("- %s。" % w)
-    if p.get("error"):
-        lines.append("- 分析执行中的问题：%s。" % p["error"])
+        # 已经拒绝建模时，"模型参数估计不稳定"是句废话：根本没有拟合模型。
+        if p.get("refused") and "参数估计不稳定" in str(w):
+            continue
+        lines.append("- %s" % str(w).rstrip("。；; "))
+    if p.get("error") and not p.get("refused"):
+        # 拒绝建模的理由已经在「结果与解读」里说过一遍，这里只报真正的执行故障；
+        # 否则同一段话会出现两次，读者以为出了两次问题。
+        # 拒绝的理由本身可能已经带句号，别叠成「序列。。」
+        lines.append("- 分析执行中的问题：%s" % str(p["error"]).rstrip("。；; "))
     lines.append("")
     return lines

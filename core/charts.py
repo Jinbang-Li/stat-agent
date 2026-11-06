@@ -137,6 +137,7 @@ def _line(spec, w, h):
     series = [s for s in (spec.get("series") or []) if s.get("points")]
     if not series:
         return _empty(w, h, "无数据")
+    labels = spec.get("x_labels") or None
     xs, ys = [], []
     for s in series:
         for p in s["points"]:
@@ -156,7 +157,13 @@ def _line(spec, w, h):
         parts.append(_text(PAD_L - 8, y + 4, _num(t), size=11, anchor="end", fill=GRAY))
     for t in xt:
         x = _sx(t, x0, x1, w)
-        parts.append(_text(x, h - PAD_B + 18, _num(t, 0), size=11, anchor="middle", fill=GRAY))
+        if labels:
+            # 横轴是「2023第2季度」这类文本时，按序号贴标签，不硬转成数字
+            idx = int(round(t))
+            lab = labels[idx] if 0 <= idx < len(labels) else ""
+        else:
+            lab = _num(t, 0)
+        parts.append(_text(x, h - PAD_B + 18, lab, size=11, anchor="middle", fill=GRAY))
     for i, s in enumerate(series):
         pts = [(p[0], p[1]) for p in s["points"] if p and p[1] is not None]
         if not pts:

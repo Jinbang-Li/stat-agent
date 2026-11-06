@@ -20,9 +20,10 @@ import pandas as pd
 
 from . import analysis as analysis_mod
 from . import audit, config, history, schema as schema_mod
+from . import schema_infer
 from .charts import render as render_svg
 from .data_loader import cleaning_notes, detect_structure, profile, to_frame
-from .intent import classify
+from .intent import Intent, classify
 from .llm_client import LLMClient
 from .logging_setup import Timer, get_logger, log_event, new_trace_id, set_stage
 from .nlsql import (FIELD_ALIASES, NL2SQL, county_names, detect_county,
@@ -188,6 +189,7 @@ def answer_frame(df, question="", session_id="local", actor="local", llm=None,
     r.question = (question or "").strip()
     # 用户没写问题时补一句默认的，而不是留空：
     # 报告标题、历史记录、审计都要能说清"这次到底分析的是什么"。
+    auto_intent = not r.question
     if not r.question:
         r.question = DEFAULT_FRAME_QUESTION
     r.session_id = session_id or "local"
@@ -213,6 +215,13 @@ def answer_frame(df, question="", session_id="local", actor="local", llm=None,
         set_stage("intent")
         with Timer() as t:
             intent = classify(r.question, llm if llm.online else None)
+        # 没提问、或那句话里没有任何方法词（"收入怎么样？"）时，
+        # 让表结构决定默认动作——用户不必先学会这套系统怎么问。
+        # 用户明确说了"看分布/预测/有没有差异"就一律以用户为准。
+        if auto_intent or str(intent.reason or "").startswith("未命中"):
+            rec = schema_infer.recommend(df, None, r.question)
+            if auto_intent or rec["intent"] != intent.name:
+                intent = Intent(rec["intent"], "structure", rec["reason"])
         r.timings["intent_ms"] = t.ms
         r.intent = intent.to_dict()
         if intent.causal_request:
@@ -329,6 +338,23 @@ def _analyze(r, df, intent, llm, ctx):
         plan = route(df, intent, r.question)
     r.timings["route_ms"] = t.ms
     plan = _relabel_steps(plan, ctx.get("data_source", "sql"))
+
+    # 面板数据做组间比较时，同一单位会出现多次（48 县 × 9 年）。
+    # 跨年混算会让 n 虚高、观测不独立，p 值被压小——那不是"差异更显著"，
+    # 是把时间趋势当成了样本差异。SQL 通道在模板里已经限了最新一年，
+    # Excel 通道没有 SQL 可限，所以在这里补一刀。
+    if plan.method == "group_compare" and plan.structure.get("kind") == "panel":
+        tcol = plan.columns.get("time")
+        if tcol and tcol in df.columns:
+            periods = sorted(df[tcol].dropna().astype(str).unique())
+            if len(periods) >= 2:
+                latest = periods[-1]
+                before = len(df)
+                df = df[df[tcol].astype(str) == latest]
+                plan.step("截面化", "面板数据按最新一期（%s）比较，%d 行 → %d 行，"
+                                    "避免同一单位多年重复计数"
+                          % (latest, before, len(df)))
+                r.n_rows = int(len(df))
     r.plan = plan.to_dict()
 
     used = []
@@ -354,8 +380,12 @@ def _analyze(r, df, intent, llm, ctx):
     r.charts = charts
 
     if an.error and not plan.reject:
-        r.error = an.error
-        r.degraded.append("analysis:error")
+        if getattr(an, "refused", False):
+            # 拒绝建模是把关成功，不是失败：报告照发，结果仍算 ok。
+            r.degraded.append("analysis:refused")
+        else:
+            r.error = an.error
+            r.degraded.append("analysis:error")
 
     # ---- 7 报告
     set_stage("report")

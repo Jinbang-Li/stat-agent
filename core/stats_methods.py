@@ -524,10 +524,17 @@ def _fit_arima(series, d):
         return None, {"error": "statsmodels ARIMA 不可用"}
     best = None
     last_err = ""
+    unstable = False
     for order in [(1, d, 0), (0, d, 1), (1, d, 1), (2, d, 0), (0, d, 0)]:
         try:
             model = ARIMA(series.values, order=order)
-            res = model.fit(disp=0, trend="c" if d == 0 else "nc")
+            # 参数少、序列短时 statsmodels 常报 Hessian 求逆失败：
+            # 预测值仍可用，但系数标准误没有意义。压掉噪声，换成一句人话提示。
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                res = model.fit(disp=0, trend="c" if d == 0 else "nc")
+            if any("HessianInversion" in type(w.message).__name__ for w in caught):
+                unstable = True
             if best is None or res.aic < best[0]:
                 best = (res.aic, order, res)
         except Exception as e:                             # noqa: BLE001
@@ -552,10 +559,16 @@ def _fit_arima(series, d):
     except Exception as e:                                 # noqa: BLE001
         return None, {"error": "预测失败：%s" % e}
 
+    # 注意：statsmodels 的 params 是 ndarray，写 `or []` 会在参数多于 1 个时
+    # 抛 "truth value of an array is ambiguous"——单参数模型反而正常，
+    # 所以要显式判 None。
+    params = getattr(res, "params", None)
+    n_params = 0 if params is None else int(np.asarray(params).ravel().shape[0])
     return {"values": values, "index": index, "conf": conf}, {
         "order": list(order), "aic": _r(aic),
         "name": "ARIMA(%d,%d,%d)" % order,
-        "params": len(getattr(res, "params", []) or []),
+        "params": n_params,
+        "unstable": bool(unstable),
     }
 
 

@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 from . import config
+from . import schema_infer
 from .data_loader import (categorical_columns, detect_structure, numeric_columns)
 
 # 不作为分析变量的技术列
@@ -72,39 +73,39 @@ def classify_columns(df):
 
     这一步做错，后面全错。例如把 year 当数值变量去算"年份与GDP的相关"，
     得到 0.9 的相关系数，然后郑重宣布"年份显著影响 GDP"——这不是发现，是废话。
+
+    列名识别交给 `schema_infer`：Excel 表是用户带来的，列名可能是
+    「年份」「统计周期」「2023年」甚至英文，写死几个字段名认不出来。
     """
-    time_col = None
-    unit_col = None
-    for c in df.columns:
-        low = c.lower()
-        if low in ("year", "year_id") and df[c].dtype.kind in "if":
-            time_col = c
-            break
-    for c in df.columns:
-        low = c.lower()
-        if low in ("county_name", "county_id", "name", "region", "province"):
-            unit_col = c
-            break
+    roles = schema_infer.guess_roles(df)
+    time_col = roles["time"]
+    unit_col = roles["unit"]
 
     num, cat = [], []
     for c in df.columns:
-        if c == time_col:
+        if c == time_col or c in roles["ids"]:
             continue
         s = df[c]
         if s.dtype.kind in "if":
-            uniq = s.nunique(dropna=True)
-            # 二值/少取值整数列按分类处理
-            if uniq <= 2 and float(s.dropna().isin([0, 1]).mean() if s.notnull().any() else 0) == 1.0:
+            uniq = int(s.nunique(dropna=True))
+            # 二值/少取值整数列按分类处理（如 is_poverty_county 的 0/1）
+            if uniq <= 2 and schema_infer._binary(s):
                 cat.append(c)
             elif uniq <= 1:
                 continue
             else:
                 num.append(c)
         else:
-            if s.nunique(dropna=True) <= config.MAX_CATEGORIES:
+            if int(s.nunique(dropna=True)) <= config.MAX_CATEGORIES:
                 cat.append(c)
 
-    return {"time": time_col, "unit": unit_col, "numeric": num, "categorical": cat}
+    return {"time": time_col, "unit": unit_col, "numeric": num, "categorical": cat,
+            "group": roles["group"], "roles": {
+                "time": roles["time"], "group": roles["group"],
+                "groups": roles["groups"], "unit": roles["unit"],
+                "n_units": roles["n_units"], "n_periods": roles["n_periods"],
+                "notes": roles["notes"],
+            }}
 
 
 def _missing_ok(df, col):
@@ -131,6 +132,11 @@ def route(df, intent, question=""):
     cols = classify_columns(df)
     plan.columns = cols
     plan.structure = detect_structure(df, cols["unit"], cols["time"])
+    roles_notes = list((cols.get("roles") or {}).get("notes") or [])
+    if roles_notes:
+        # 把"我认出了哪些列、凭什么"写进决策轨迹。
+        # 用户看到「分组列「地形」：3 个类别」才知道系统没在瞎猜。
+        plan.step("识别数据角色", "；".join(roles_notes))
     plan.step("识别数据结构",
               "%s（%s）" % (plan.structure["kind"], plan.structure["reason"]))
 
@@ -269,7 +275,8 @@ def _route_group(df, plan, question):
         return plan.reject_with("no_numeric", "结果集中没有可分析的数值指标",
                                 "请指定要比较的指标，例如「居民收入」")
 
-    group_col = _pick_group_col(df, cat, question)
+    group_col = _pick_group_col(df, cat, question,
+                                preferred=plan.columns.get("group"))
     value_col = _pick_value_col(num, question)
 
     counts = df[group_col].value_counts()
@@ -300,10 +307,16 @@ def _route_group(df, plan, question):
     return plan
 
 
-def _pick_group_col(df, cat, question):
-    """优先选问题里提到的维度，其次选类别数适中的。"""
+def _pick_group_col(df, cat, question, preferred=None):
+    """选分组维度：问题点名的 > 结构识别推荐的 > 名字像分组维度的 > 类别数适中的。"""
+    q = question or ""
     for c in cat:
-        if c and c in question:
+        if c and str(c) in q:
+            return c
+    if preferred and preferred in cat:
+        return preferred
+    for c in cat:
+        if schema_infer.is_group_name(str(c)):
             return c
     for c in cat:
         k = df[c].nunique(dropna=True)
@@ -321,10 +334,19 @@ _METRIC_HINTS = ("收入", "生产总值", "产值", "财政", "人口", "第二
 
 
 def _pick_value_col(num, question):
-    """按问题里出现的指标关键词挑数值列；挑不出来才退回第一列。"""
+    """按问题里的指标词挑数值列；挑不出来才退回第一列。
+
+    先走同义词表（「居民收入」↔「income(元)」），再退回字符匹配。
+    Excel 表里同一张表往往有 GDP、收入、财政支出、人口四五个指标，
+    选错列的结果不是报错，而是"看起来很有道理的错误答案"。
+    """
+    col, said, score = schema_infer.match_metric(question, num)
+    if col is not None:
+        return col
+    ordered = schema_infer.order_metrics(num)
     q = (question or "").lower()
     best, best_score = None, 0
-    for c in num:
+    for c in ordered:
         name = str(c)
         score = 0
         for w in _METRIC_HINTS:
@@ -334,7 +356,7 @@ def _pick_value_col(num, question):
             score = max(score, 4)
         if score > best_score:
             best, best_score = c, score
-    return best or num[0]
+    return best or ordered[0]
 
 
 def _route_timeseries(df, plan, question):

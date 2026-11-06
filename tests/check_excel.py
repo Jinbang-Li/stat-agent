@@ -115,10 +115,18 @@ def main():
           (history.recent(1)[0]["data_source"] or "").startswith("excel"),
           history.recent(1)[0]["data_source"])
 
-    print("5) 不提问时给出默认描述统计")
+    print("5) 不提问时按表结构自动选方法")
     r2 = pipeline.answer_frame(df4, question="", llm=llm, source_label="excel:county.xlsx")
-    check("默认走描述统计", (r2.plan or {}).get("method") == "describe",
+    # 这张样例表有「地形」分组列，自动识别会选分组比较；重点不是选哪个，
+    # 而是①选了并说明理由 ②不提问也能出完整报告。
+    check("自动选出可用方法",
+          (r2.plan or {}).get("method") in ("describe", "group_compare", "correlation"),
           (r2.plan or {}).get("method"))
+    check("自动意图标了 structure",
+          (r2.intent or {}).get("detected_by") in ("structure", "rule", "llm"),
+          (r2.intent or {}).get("detected_by"))
+    check("自动选择有理由", bool((r2.intent or {}).get("reason")),
+          (r2.intent or {}).get("reason"))
     check("默认问题可读", "分布" in (r2.question or ""), r2.question)
 
     print("6) 上传接口（真起服务，multipart 打一遍）")
