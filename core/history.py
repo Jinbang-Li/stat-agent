@@ -148,7 +148,8 @@ def summarize(r):
         t = stats["timeseries"]
         if t.get("refused"):
             return "时序拒绝建模：%s" % (t.get("reason") or "")
-        g = t.get("growth_pct")
+        # stats_methods 里叫 growth_rate（百分数）；growth_pct 是早先的键名，留着兼容旧记录
+        g = t.get("growth_rate", t.get("growth_pct"))
         return "趋势：年均增速 %s%%，R²=%s" % (_num(g, 2), _num(t.get("r2"), 3))
     if stats.get("cluster"):
         c = stats["cluster"]
